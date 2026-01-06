@@ -1,6 +1,6 @@
 from pathlib import Path
 from google import genai
-import os
+import os, asyncio
 import json, asyncio, subprocess
 from google.genai import types
 from openai import AsyncOpenAI
@@ -23,7 +23,7 @@ class DocumerConfig:
         self.repo_name = repository_url.rsplit('/')[-1]
         self.owner = repository_url.rsplit('/')[-2]
         self.slug = '/'.join([self.owner, self.repo_name])
-        self.tools = types.Tool(function_declarations=tools)
+        self.tools = tools
         self.fn_dict = fn_dict
         self.thinking_level = thinking_level
 
@@ -31,13 +31,21 @@ class Documer:
     def __init__(self, config):
         self.config = config
         self.agents = DocumerAgent(config)
+    
+    async def generate_documentation(self):
+        self.initialize_repo()
+        plan, src = await self.generate_plan()
 
     def initialize_repo(self):
         subprocess.run(['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'])
         subprocess.run(['bash', 'filter_repo.sh', f'./repository/{self.config.repo_name}'])
         os.chdir(f'repository/{self.config.repo_name}')
 
-    
+    async def generate_plan(self):
+        report = await self.agents.src_architect_agent()
+        tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
+        plan, src = await asyncio.gather(*tasks)
+        return plan, src
 
 class DocumerAgent:
     def __init__(self, config):
@@ -49,7 +57,7 @@ class DocumerAgent:
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{slug}}", self.config.slug)
-        gemini_config = types.GenerateContentConfig(tools=self.config.tools[:1], 
+        gemini_config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=self.config.tools[:1])],
             thinking_config=types.ThinkingConfig(
                 include_thoughts=True,
                 thinking_level=self.config.thinking_level
@@ -144,7 +152,7 @@ class DocumerAgent:
             response_mime_type="application/json",
             response_schema=schema
         )
-        chat = self.gemini_client.aio.chats.create(model=self.model, config=gemini_config)
+        chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
         response = await chat.send_message(
             prompt
         )
