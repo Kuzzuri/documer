@@ -35,6 +35,10 @@ class Documer:
     async def generate_documentation(self):
         self.initialize_repo()
         plan, src = await self.generate_plan()
+        os.chdir(src)
+        plan_final = await self.get_symbol_files(plan)
+        plan = await self.doc_generator(plan_final)
+        print(plan)
 
     def initialize_repo(self):
         subprocess.run(['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'])
@@ -47,6 +51,54 @@ class Documer:
         plan, src = await asyncio.gather(*tasks)
         return plan, src
 
+    async def get_symbol_files(self, plan):
+        sets = await collect_api_items(plan)
+        percentage = check_api_percentage(sets)
+        if percentage:
+            tasks = [self.web_search_path(s) for s in sets]
+        else:
+            tasks = [self.web_search_path(s) for s in sets]
+        symbols = await asyncio.gather(*tasks)
+        plan_with_content = await self.add_plan_contents(plan, symbols)
+        return plan_with_content
+    
+    async def web_search_path(self, symbol):
+        symbol_json = await self.agents.symbol_file_agent(symbol)
+        cwd = os.getcwd()
+        if Path(os.path.join(cwd, symbol_json[symbol])).exists():
+            file_path = os.path.join(cwd, symbol_json[symbol])
+            with open(file_path, 'r') as f:
+                file_content = f.read()
+        elif Path(os.path.join(cwd, symbol_json[symbol].split('/', 1)[-1])).exists():
+            file_path = os.path.join(cwd, symbol_json[symbol].split('/', 1)[-1])
+            with open(file_path, 'r') as f:
+                file_content = f.read()
+        else:
+            file_text = await self.agents.symbol_web_agent(symbol)
+            file_content = file_text[symbol]
+        return {symbol: file_content}
+
+    async def symbol_semantic_agent(self, symbol):
+        pass
+    
+    async def add_plan_contents(self, plan, symbols):
+        symbols_dict = {list(d.keys())[0]: list(d.values())[0] for d in symbols}
+        for item in plan:
+            item["api_items"] = {api: symbols_dict[api] for api in item["api_items"]}
+        return plan
+
+    async def doc_generator(self, plan):
+        with open(f"{self.config.root_directory}/prompts/page_generator_agent.md", "r") as f:
+            prompt_raw = f.read()
+        tasks = [self.agents.page_generator_agent(p, prompt_raw) for p in plan]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"Task {i} failed")
+            else:
+                print(f"Task {i} succeeded")
+        return results
+    
 class DocumerAgent:
     def __init__(self, config):
         self.config = config
@@ -169,10 +221,10 @@ class DocumerAgent:
         token_count = await check_token_count(results)
         if not token_count:
             results = subprocess.run(f"rg -i '{symbol}' --files-with-matches", shell=True, capture_output=True, text=True).stdout
-        with open(f"{self.config.root_directory}/symbol_getter.md") as f:
+        with open(f"{self.config.root_directory}/prompts/symbol_file_agent.md") as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{symbol}}", symbol).replace('{{repository}}', self.config.slug).replace("{{grep_results}}", results)
-        response = await self.config.gemini_client.responses.parse(
+        response = await self.openai_client.responses.parse(
             model=self.config.sub_model,
             input=prompt,
             text_format=PathResponse
@@ -181,11 +233,11 @@ class DocumerAgent:
         return {symbol: path}
 
     async def symbol_web_agent(self, symbol):
-        with open(f"{self.config.root_directory}/prompts/symbol_search.md") as f:
+        with open(f"{self.config.root_directory}/prompts/symbol_web_agent.md") as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{symbol}}", symbol).replace('{{repository}}', self.config.slug)
-        response = await self.config.gemini_client.responses.create(
-            model=self.config.model,
+        response = await self.openai_client.responses.create(
+            model=self.config.sub_model,
             input=prompt,
             tools=[
                 {
@@ -212,87 +264,80 @@ class DocumerAgent:
         path = await self.symbol_file_agent(results)
         return path
     
-    async def page_gen(self, prompt_raw, section,):
+    async def page_generator_agent(self, section, prompt_raw):
+        prompt = prompt_raw.replace('{{slug}}', self.config.slug).replace('{{title}}', section["title"]).replace('{{concept}}', section["concept"]).replace('{{api_items}}', str(section["api_items"]))
         schema = {
-  "type": "object",
-  "properties": {
-    "blocks": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "h1",
-              "h2",
-              "h3",
-              "p",
-              "list",
-              "code_block"
-            ]
-          },
-          "content": {
-            "type": "string",
-            "maxLength": 1000
-          },
-          "ordered": {
-            "type": "boolean"
-          },
-          "items": {
-            "type": "array",
+    "type": "object",
+    "properties": {
+        "blocks": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+            "type": {
+                "type": "string",
+                "enum": [
+                "h1",
+                "h2",
+                "h3",
+                "p",
+                "list",
+                "code_block"
+                ]
+            },
+            "content": {
+                "type": "string",
+                "maxLength": 1000
+            },
+            "ordered": {
+                "type": "boolean"
+            },
             "items": {
-              "type": "string"
+                "type": "array",
+                "items": {
+                "type": "string"
+                }
+            },
+            "code": {
+                "type": "string"
+            },
+            "variant": {
+                "type": "string",
+                "enum": [
+                "info",
+                "warning",
+                "danger",
+                "tip",
+                "note"
+                ]
+            },
+            "title": {
+                "type": "string",
+                "maxLength": 80
             }
-          },
-          "code": {
-            "type": "string"
-          },
-          "variant": {
-            "type": "string",
-            "enum": [
-              "info",
-              "warning",
-              "danger",
-              "tip",
-              "note"
+            },
+            "required": [
+            "type"
+            ],
+            "propertyOrdering": [
+            "type",
+            "content",
+            "ordered",
+            "items",
+            "code",
+            "variant",
+            "title"
             ]
-          },
-          "title": {
-            "type": "string",
-            "maxLength": 80
-          }
-        },
-        "required": [
-          "type"
-        ],
-        "propertyOrdering": [
-          "type",
-          "content",
-          "ordered",
-          "items",
-          "code",
-          "variant",
-          "title"
-        ]
-      }
+        }
+        }
+    },
+    "required": [
+        "blocks"
+    ],
+    "propertyOrdering": [
+        "blocks"
+    ]
     }
-  },
-  "required": [
-    "blocks"
-  ],
-  "propertyOrdering": [
-    "blocks"
-  ]
-}
-        api_items = []
-        for d in section["api_items"]:
-            for k, v in d.items():
-                if Path(v).exists():
-                    with open(v, 'r') as f:
-                        file_content = f.read()
-                    api_items.append({k: file_content})
-        prompt = prompt_raw.replace('{{slug}}', self.congif.slug).replace('{{title}}', section["title"]).replace('{{concept}}', section["concept"]).replace('{{api_items}}', str(api_items))
         gemini_config = types.GenerateContentConfig(
             thinking_config=types.ThinkingConfig(
                 include_thoughts=False,
@@ -301,7 +346,7 @@ class DocumerAgent:
             response_mime_type="application/json",
             response_schema=schema
         )
-        chat = self.gemini_client.aio.chats.create(model=self.congif.model, config=gemini_config)
+        chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
         response = await chat.send_message(
             prompt
         )
