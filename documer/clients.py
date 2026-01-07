@@ -55,14 +55,14 @@ class Documer:
         sets = await collect_api_items(plan)
         percentage = check_api_percentage(sets)
         if percentage:
-            tasks = [self.web_search_path(s) for s in sets]
+            tasks = [self.get_symbols_fallback_web(s) for s in sets]
         else:
-            tasks = [self.web_search_path(s) for s in sets]
+            tasks = [self.get_symbols_fallback_semantic(s) for s in sets]
         symbols = await asyncio.gather(*tasks)
         plan_with_content = await self.add_plan_contents(plan, symbols)
         return plan_with_content
     
-    async def web_search_path(self, symbol):
+    async def get_symbols_fallback_web(self, symbol):
         symbol_json = await self.agents.symbol_file_agent(symbol)
         cwd = os.getcwd()
         if Path(os.path.join(cwd, symbol_json[symbol])).exists():
@@ -78,9 +78,27 @@ class Documer:
             file_content = file_text[symbol]
         return {symbol: file_content}
 
-    async def symbol_semantic_agent(self, symbol):
-        pass
-    
+    async def get_symbols_fallback_semantic(self, symbol):
+        symbol_json = await self.agents.symbol_file_agent(symbol)
+        cwd = os.getcwd()
+        if Path(os.path.join(cwd, symbol_json[symbol])).exists():
+            file_path = os.path.join(cwd, symbol_json[symbol])
+            with open(file_path, 'r') as f:
+                file_content = f.read()
+        elif Path(os.path.join(cwd, symbol_json[symbol].split('/', 1)[-1])).exists():
+            file_path = os.path.join(cwd, symbol_json[symbol].split('/', 1)[-1])
+            with open(file_path, 'r') as f:
+                file_content = f.read()
+        else:
+            file_text = await self.agents.symbol_semantic_agent(symbol)
+            file_path = next(iter(file_text.values()))
+            try:
+                with open(file_path, 'r') as f:
+                    file_content = f.read()
+            except FileNotFoundError:
+                return {symbol: "this api item could not be found in the repository"}
+        return {symbol: file_content}
+
     async def add_plan_contents(self, plan, symbols):
         symbols_dict = {list(d.keys())[0]: list(d.values())[0] for d in symbols}
         for item in plan:
@@ -248,20 +266,44 @@ class DocumerAgent:
         text = response.output_text
         return {symbol: text}
     
-    async def semantic_search_agent(self, symbol, concept, title):
-        with open(f"{self.config.root_directory}/prompts/semantic_search_agent.md") as f:
+    async def symbol_semantic_agent(self, symbol, concept=None, title=None):
+        schema = {
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "term": {
+            "type": "string"
+          }
+        },
+        "required": ["term"]
+      }
+    }
+  },
+  "required": ["items"]
+}
+        with open(f"{self.config.root_directory}/prompts/symbol_semantic_agent.md") as f:
             prompt_raw = f.read()
-        prompt = prompt_raw.replace("{{slug}}", self.config.slug).replace("{{symbol}}", symbol).replace("{{concept}}", concept).replace("{{title}}", title)
-        chat = self.gemini_client.aio.chats.create(model=self.config.model)
+        prompt = prompt_raw.replace("{{slug}}", self.config.slug).replace("{{symbol}}", symbol)
+        # .replace("{{concept}}", concept).replace("{{title}}", title)
+        gemini_config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema
+        )
+        chat = self.gemini_client.aio.chats.create(model='gemini-2.5-flash-lite', config=gemini_config)
         response = await chat.send_message(
             prompt
         )
         items = json.loads(response.candidates[0].content.parts[0].text)
         results = []
-        for k, v in items.values():
-            result = subprocess.run(f"rg -i '{v}'", shell=True, capture_output=True, text=True).stdout
-            results.append(*result)
-        path = await self.symbol_file_agent(results)
+        for item in items["items"]:
+            for k, v in item.items():
+                result = subprocess.run(f"rg -i '{v}'", shell=True, capture_output=True, text=True).stdout
+                results.append(result)
+        path = await self.symbol_file_agent(str(results))
         return path
     
     async def page_generator_agent(self, section, prompt_raw):
