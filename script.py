@@ -3,6 +3,7 @@
 from documer.clients import DocumerConfig, Documer
 from documer.agent_tools import list_directory, grep, find
 import sys, asyncio, subprocess
+import os, json
 
 fn_dict = {
     "list_directory": list_directory,
@@ -61,13 +62,14 @@ find_dict = {
 
 async def main():
     try:
-        repo = sys.argv[1]
-        config = DocumerConfig( api_key="AIzaSyBlPfte81zEqwjlLg5CK21O0KCYXWpxo4A", sub_api_key="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",repository_url=repo, model="gemini-3-flash-preview", sub_model="gpt-5-nano", tools=[list_directory_dict, grep_dict, find_dict], fn_dict=fn_dict, thinking_level="HIGH")
+        repo =os.getenv('REPOSITORY')
+        config = DocumerConfig( api_key=os.getenv('GEMINI_API_KEY'), sub_api_key=os.getenv('OPENAI_API_KEY'),repository_url=repo, model="gemini-3-flash-preview", sub_model="gpt-5-nano", tools=[list_directory_dict, grep_dict, find_dict], fn_dict=fn_dict, thinking_level="HIGH")
 
         documer = Documer(config)
-        await documer.generate_documentation()
+        result = await documer.generate_documentation()
+        print(json.dumps(result))
     finally:
-        subprocess.run('rm -rf /Users/umuttengiz/MyCode/Documer/repository/*', shell=True)
+        subprocess.run('rm -rf ./repository/*', shell=True)
 
 
 asyncio.run(main())

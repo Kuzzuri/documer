@@ -19,7 +19,7 @@ class DocumerConfig:
         self.repository_url = repository_url
         self.model = model
         self.sub_model = sub_model
-        self.root_directory = Path(__file__).resolve().parent.parent
+        self.root_directory = Path.cwd()
         self.repo_name = repository_url.rsplit('/')[-1]
         self.owner = repository_url.rsplit('/')[-2]
         self.slug = '/'.join([self.owner, self.repo_name])
@@ -38,7 +38,7 @@ class Documer:
         os.chdir(src)
         plan_final = await self.get_symbol_files(plan)
         plan = await self.doc_generator(plan_final)
-        print(plan)
+        return plan
 
     def initialize_repo(self):
         subprocess.run(['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'])
