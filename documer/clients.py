@@ -35,21 +35,28 @@ class Documer:
     async def generate_documentation(self):
         self.initialize_repo()
         plan, src = await self.generate_plan()
-        os.chdir(src)
-        plan_final = await self.get_symbol_files(plan)
-        plan = await self.doc_generator(plan_final)
-        return plan
+        # os.chdir(src)
+        # plan_final = await self.get_symbol_files(plan)
+        # plan = await self.doc_generator(plan_final)
+        # return plan
 
     def initialize_repo(self):
-        subprocess.run(['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'])
+        subprocess.run(
+    ['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL
+)
         subprocess.run(['bash', 'filter_repo.sh', f'./repository/{self.config.repo_name}'])
         os.chdir(f'repository/{self.config.repo_name}')
 
     async def generate_plan(self):
         report = await self.agents.src_architect_agent()
-        tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
-        plan, src = await asyncio.gather(*tasks)
-        return plan, src
+        # tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
+        tasks = [self.agents.planner_agent(report)]
+        plan = await asyncio.gather(*tasks)
+        # plan, src = await asyncio.gather(*tasks)
+        # return plan, src
+        return plan, '/src'
 
     async def get_symbol_files(self, plan):
         sets = await collect_api_items(plan)
@@ -110,11 +117,6 @@ class Documer:
             prompt_raw = f.read()
         tasks = [self.agents.page_generator_agent(p, prompt_raw) for p in plan]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"Task {i} failed")
-            else:
-                print(f"Task {i} succeeded")
         return results
     
 class DocumerAgent:
@@ -200,11 +202,17 @@ class DocumerAgent:
         response_schema=schema
         )
         chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
-        response = await chat.send_message(
+        response = ''
+        response_stream = await chat.send_message_stream(
             prompt
         )
-        plan = json.loads(response.candidates[0].content.parts[0].text)
-        return plan["plan"]
+        async for chunk in response_stream:
+            if chunk.text:
+                response += chunk.text
+                escaped = chunk.text.replace('\n', ' ')
+                print(f'PLAN_CHUNK:{escaped}', flush=True)
+        plan_data = json.loads(response) 
+        return plan_data["plan"]
     
     async def src_path_extractor_agent(self, report):
         prompt = f"Based on the text, output the source code path {report}"
