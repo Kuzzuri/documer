@@ -67,7 +67,7 @@ async def main():
         config = DocumerConfig( api_key=os.getenv('GEMINI_API_KEY'), sub_api_key=os.getenv('OPENAI_API_KEY'),repository_url=repo, model="gemini-3-flash-preview", sub_model="gpt-5-nano", tools=[list_directory_dict, grep_dict, find_dict], fn_dict=fn_dict, thinking_level="HIGH")
         documer = Documer(config)
         result = await documer.generate_documentation()
-        print(json.dumps(result))
+        # print(json.dumps(result))
     finally:
         subprocess.run('rm -rf ./repository/*', shell=True)
 

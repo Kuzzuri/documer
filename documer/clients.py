@@ -35,10 +35,10 @@ class Documer:
     async def generate_documentation(self):
         self.initialize_repo()
         plan, src = await self.generate_plan()
-        # os.chdir(src)
-        # plan_final = await self.get_symbol_files(plan)
-        # plan = await self.doc_generator(plan_final)
-        # return plan
+        os.chdir(src)
+        plan_final = await self.get_symbol_files(plan)
+        plan = await self.doc_generator(plan_final)
+        return plan
 
     def initialize_repo(self):
         subprocess.run(
@@ -51,12 +51,9 @@ class Documer:
 
     async def generate_plan(self):
         report = await self.agents.src_architect_agent()
-        # tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
-        tasks = [self.agents.planner_agent(report)]
-        plan = await asyncio.gather(*tasks)
-        # plan, src = await asyncio.gather(*tasks)
-        # return plan, src
-        return plan, '/src'
+        tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
+        plan, src = await asyncio.gather(*tasks)
+        return plan, src
 
     async def get_symbol_files(self, plan):
         sets = await collect_api_items(plan)
@@ -397,8 +394,16 @@ class DocumerAgent:
             response_schema=schema
         )
         chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
-        response = await chat.send_message(
+        response = ''
+        response_stream = await chat.send_message_stream(
             prompt
         )
-        page = json.loads(response.candidates[0].content.parts[0].text)
+        async for chunk in response_stream:
+            if chunk.text:
+                response += chunk.text
+                escaped = chunk.text.replace('\n', ' ')
+                print(f'RESPONSEID_{chunk.response_id}:{escaped}', flush=True)
+        page = json.loads(response) 
         return page
+    
+    
