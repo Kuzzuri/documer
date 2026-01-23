@@ -8,12 +8,14 @@ from pydantic import BaseModel
 from .tools import has_function_calls, get_function_calls, collect_api_items, switch_to_paths, check_if_path, check_token_count
 from .utils import check_api_percentage, check_api_path
 import httpx
+from anthropic import AsyncAnthropic
+
 
 class PathResponse(BaseModel):
     path: str
 
 class DocumerConfig:
-    def __init__(self, id, api_key, sub_api_key, repository_url, model, sub_model, tools, fn_dict, thinking_level, token):
+    def __init__(self, id, api_key, sub_api_key, validator_api_key, repository_url, model, sub_model, tools, fn_dict, thinking_level, token, agent_model):
         self.id = id
         self.api_key = api_key
         self.sub_api_key = sub_api_key
@@ -28,6 +30,8 @@ class DocumerConfig:
         self.fn_dict = fn_dict
         self.thinking_level = thinking_level
         self.token = token
+        self.agent_model = agent_model
+        self.validator_api_key = validator_api_key
 
 class Documer:
     def __init__(self, config):
@@ -41,7 +45,10 @@ class Documer:
             print(f'UPDATE:Analyzing Repository', flush=True)
             self.initialize_repo()
             print(f'UPDATE:Generating Documentation Plan', flush=True)
-            plan, src = await self.generate_plan(Client)
+            if self.config.agent_model == 'D1M':
+                plan, src = await self.generate_plan_pro(Client)
+            else:
+                plan, src = await self.generate_plan(Client)
             print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
             plan_final = await self.get_symbol_files(plan)
@@ -49,7 +56,6 @@ class Documer:
             tasks = [self.post_page(Client, r, self.config.token) for r in results]
             result = await asyncio.gather(*tasks, return_exceptions=True)
             await self.post_status(Client, self.config.token)
-
 
     def initialize_repo(self):
         subprocess.run(
@@ -64,6 +70,14 @@ class Documer:
         report = await self.agents.src_architect_agent()
         tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
         plan, src = await asyncio.gather(*tasks)
+        await self.post_plan(Client, plan, self.config.token)
+        return plan["plan"], src
+
+    async def generate_plan_pro(self, Client):
+        report = await self.agents.src_architect_agent()
+        tasks = [self.agents.planner_agent(report, False), self.agents.src_path_extractor_agent(report)]
+        plan_raw, src = await asyncio.gather(*tasks)
+        plan = await self.agents.validate_plan(plan_raw["plan"])
         await self.post_plan(Client, plan, self.config.token)
         return plan["plan"], src
 
@@ -154,6 +168,7 @@ class DocumerAgent:
         self.config = config
         self.gemini_client = genai.Client(api_key=config.api_key)
         self.openai_client = AsyncOpenAI(api_key=config.sub_api_key)
+        self.claude_client = AsyncAnthropic(api_key=config.validator_api_key)
     
     async def src_architect_agent(self):
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
@@ -186,7 +201,7 @@ class DocumerAgent:
         
         return response.candidates[0].content.parts[0].text
 
-    async def planner_agent(self, report):
+    async def planner_agent(self, report, stream=True):
         schema = {
   "type": "object",
   "properties": {
@@ -240,7 +255,8 @@ class DocumerAgent:
             if chunk.text:
                 response += chunk.text
                 escaped = chunk.text.replace('\n', ' ')
-                print(f'PLAN_CHUNK:{escaped}', flush=True)
+                if(stream):
+                    print(f'PLAN_CHUNK:{escaped}', flush=True)
         plan_data = json.loads(response)
         return plan_data
     
@@ -439,4 +455,59 @@ class DocumerAgent:
         page = json.loads(response) 
         return page
     
-    
+    async def validate_plan(self, plan):
+        schema = {
+    "type": "object",
+    "properties": {
+        "plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string"
+                    },
+                    "concept": {
+                        "type": "string"
+                    },
+                    "api_items": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "required": ["title", "concept"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["plan"],
+    "additionalProperties": False
+}
+        prompt = f"""
+        You will be given a repository plan for {self.config.slug}:{plan}
+        Your job is to double check it to see if it misses anything and got anything wrong and if so fix it.  Don't use dot notations/dot chaining, if thats the case use the most determinant part.
+    """
+        stream = await self.claude_client.beta.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+            extra_headers={
+                "anthropic-beta": "structured-outputs-2025-11-13"
+            },
+            output_format={
+                "type": "json_schema",
+                "schema": schema
+            },
+            stream=True
+        )
+        full_text = ""
+        async for event in stream:
+            if event.type == "content_block_delta":
+                if event.delta.type == "text_delta":
+                    full_text += event.delta.text
+                    escaped = event.delta.text.replace('\n', ' ')
+                    print(f'PLAN_CHUNK:{escaped}', flush=True)
+        result = json.loads(full_text)
+        return result
