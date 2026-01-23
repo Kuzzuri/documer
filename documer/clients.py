@@ -38,13 +38,18 @@ class Documer:
     
     async def generate_documentation(self):
         async with httpx.AsyncClient() as Client:
+            print(f'UPDATE:Analyzing Repository', flush=True)
             self.initialize_repo()
+            print(f'UPDATE:Generating Documentation Plan', flush=True)
             plan, src = await self.generate_plan(Client)
+            print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
             plan_final = await self.get_symbol_files(plan)
-            plan = await self.doc_generator(plan_final)
-            tasks = [self.post_page(Client, p, self.config.token) for p in plan]
+            results = await self.doc_generator(plan_final)
+            tasks = [self.post_page(Client, r, self.config.token) for r in results]
             result = await asyncio.gather(*tasks, return_exceptions=True)
+            await self.post_status(Client, self.config.token)
+
 
     def initialize_repo(self):
         subprocess.run(
@@ -132,6 +137,13 @@ class Documer:
 
     async def post_plan(self, client, plan, token):
         payload = {"plan": plan}
+        headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
+        r = await client.patch(self.obj_url, json=payload, headers=headers)
+        r.raise_for_status()
+        # print(r.json())
+
+    async def post_status(self, client, token):
+        payload = {"status": True}
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
         r = await client.patch(self.obj_url, json=payload, headers=headers)
         r.raise_for_status()
