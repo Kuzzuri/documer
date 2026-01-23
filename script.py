@@ -5,6 +5,8 @@ from documer.agent_tools import list_directory, grep, find
 import sys, asyncio, subprocess
 import os, json
 
+# load_dotenv()
+
 
 fn_dict = {
     "list_directory": list_directory,
@@ -63,8 +65,10 @@ find_dict = {
 
 async def main():
     try:
-        repo =os.getenv('REPOSITORY')
-        config = DocumerConfig( api_key=os.getenv('GEMINI_API_KEY'), sub_api_key=os.getenv('OPENAI_API_KEY'),repository_url=repo, model="gemini-3-flash-preview", sub_model="gpt-5-nano", tools=[list_directory_dict, grep_dict, find_dict], fn_dict=fn_dict, thinking_level="HIGH")
+        repo = os.getenv('REPOSITORY')
+        id = os.getenv('ID')
+        token = os.getenv('TOKEN')
+        config = DocumerConfig( id=id, api_key=os.getenv('GEMINI_API_KEY'), sub_api_key=os.getenv('OPENAI_API_KEY'),repository_url=repo, model="gemini-3-flash-preview", sub_model="gpt-5-nano", tools=[list_directory_dict, grep_dict, find_dict], fn_dict=fn_dict, thinking_level="HIGH", token=token)
         documer = Documer(config)
         result = await documer.generate_documentation()
         # print(json.dumps(result))

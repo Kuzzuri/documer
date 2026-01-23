@@ -7,13 +7,14 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 from .tools import has_function_calls, get_function_calls, collect_api_items, switch_to_paths, check_if_path, check_token_count
 from .utils import check_api_percentage, check_api_path
-
+import httpx
 
 class PathResponse(BaseModel):
     path: str
 
 class DocumerConfig:
-    def __init__(self, api_key, sub_api_key, repository_url, model, sub_model, tools, fn_dict, thinking_level):
+    def __init__(self, id, api_key, sub_api_key, repository_url, model, sub_model, tools, fn_dict, thinking_level, token):
+        self.id = id
         self.api_key = api_key
         self.sub_api_key = sub_api_key
         self.repository_url = repository_url
@@ -26,19 +27,24 @@ class DocumerConfig:
         self.tools = tools
         self.fn_dict = fn_dict
         self.thinking_level = thinking_level
+        self.token = token
 
 class Documer:
     def __init__(self, config):
         self.config = config
         self.agents = DocumerAgent(config)
+        self.url = 'http://127.0.0.1:8000/documentation/pages/'
+        self.obj_url = f'http://127.0.0.1:8000/documentation/?id={self.config.id}'
     
     async def generate_documentation(self):
-        self.initialize_repo()
-        plan, src = await self.generate_plan()
-        os.chdir(src)
-        plan_final = await self.get_symbol_files(plan)
-        plan = await self.doc_generator(plan_final)
-        return plan
+        async with httpx.AsyncClient() as Client:
+            self.initialize_repo()
+            plan, src = await self.generate_plan(Client)
+            os.chdir(src)
+            plan_final = await self.get_symbol_files(plan)
+            plan = await self.doc_generator(plan_final)
+            tasks = [self.post_page(Client, p, self.config.token) for p in plan]
+            result = await asyncio.gather(*tasks, return_exceptions=True)
 
     def initialize_repo(self):
         subprocess.run(
@@ -49,11 +55,12 @@ class Documer:
         subprocess.run(['bash', 'filter_repo.sh', f'./repository/{self.config.repo_name}'])
         os.chdir(f'repository/{self.config.repo_name}')
 
-    async def generate_plan(self):
+    async def generate_plan(self, Client):
         report = await self.agents.src_architect_agent()
         tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
         plan, src = await asyncio.gather(*tasks)
-        return plan, src
+        await self.post_plan(Client, plan, self.config.token)
+        return plan["plan"], src
 
     async def get_symbol_files(self, plan):
         sets = await collect_api_items(plan)
@@ -116,6 +123,20 @@ class Documer:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     
+    async def post_page(self, client, page, token):
+        payload = {"content": page, "title": "shmbala", "documentation": self.config.id}
+        headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
+        r = await client.post(self.url, json=payload, headers=headers)
+        r.raise_for_status()
+        # print(r.json())
+
+    async def post_plan(self, client, plan, token):
+        payload = {"plan": plan}
+        headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
+        r = await client.patch(self.obj_url, json=payload, headers=headers)
+        r.raise_for_status()
+        # print(r.json())
+
 class DocumerAgent:
     def __init__(self, config):
         self.config = config
@@ -208,8 +229,8 @@ class DocumerAgent:
                 response += chunk.text
                 escaped = chunk.text.replace('\n', ' ')
                 print(f'PLAN_CHUNK:{escaped}', flush=True)
-        plan_data = json.loads(response) 
-        return plan_data["plan"]
+        plan_data = json.loads(response)
+        return plan_data
     
     async def src_path_extractor_agent(self, report):
         prompt = f"Based on the text, output the source code path {report}"
