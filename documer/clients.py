@@ -6,9 +6,11 @@ from google.genai import types
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from .tools import has_function_calls, get_function_calls, collect_api_items, switch_to_paths, check_if_path, check_token_count
-from .utils import check_api_percentage, check_api_path
+from .utils import check_api_percentage, check_api_path, log_retry
 import httpx
 from anthropic import AsyncAnthropic
+import tenacity
+from tenacity import retry, stop_after_attempt, retry_if_exception_type
 
 
 class PathResponse(BaseModel):
@@ -170,6 +172,7 @@ class DocumerAgent:
         self.openai_client = AsyncOpenAI(api_key=config.sub_api_key)
         self.claude_client = AsyncAnthropic(api_key=config.validator_api_key)
     
+    @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(KeyError), after=log_retry)
     async def src_architect_agent(self):
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
             prompt_raw = f.read()
@@ -260,6 +263,7 @@ class DocumerAgent:
         plan_data = json.loads(response)
         return plan_data
     
+    @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(FileNotFoundError), after=log_retry)
     async def src_path_extractor_agent(self, report):
         prompt = f"Based on the text, output the source code path {report}"
         schema = { "type": "object", "properties": { "path": { "type": "string" } }, "required": [ "path" ], "propertyOrdering": [ "path" ] }
@@ -285,6 +289,9 @@ class DocumerAgent:
             src = '.'
         else:
             src = path["path"]
+
+        if not os.path.exists(src):
+            raise FileNotFoundError(f"Path does not exist: {src}")
 
         return src
     

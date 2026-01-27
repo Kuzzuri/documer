@@ -22,3 +22,6 @@ def check_api_path(api_items):
         if not Path(v).exists():
             unfound.append(k)
     return unfound
+
+def log_retry(retry_state):
+    print(f"Retrying due to: {retry_state.outcome.exception()}")
