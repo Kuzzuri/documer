@@ -54,7 +54,7 @@ class Documer:
                 plan, src = await self.generate_plan(Client)
             print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
-            plan_final = await self.get_symbol_files(plan)
+            plan_final = await self.get_symbol_files(plan, Client, self.config.token, self.token_url)
             results = await self.doc_generator(plan_final)
             tasks = [self.post_page(Client, r, self.config.token) for r in results]
             result = await asyncio.gather(*tasks, return_exceptions=True)
@@ -84,19 +84,19 @@ class Documer:
         await self.post_plan(Client, plan, self.config.token)
         return plan["plan"], src
 
-    async def get_symbol_files(self, plan):
+    async def get_symbol_files(self, plan, client, auth_token, token_url):
         sets = await collect_api_items(plan)
         percentage = check_api_percentage(sets)
         if percentage:
-            tasks = [self.get_symbols_fallback_web(s) for s in sets]
+            tasks = [self.get_symbols_fallback_web(s, client, auth_token, token_url) for s in sets]
         else:
-            tasks = [self.get_symbols_fallback_semantic(s) for s in sets]
+            tasks = [self.get_symbols_fallback_semantic(s, client, auth_token, token_url) for s in sets]
         symbols = await asyncio.gather(*tasks)
         plan_with_content = await self.add_plan_contents(plan, symbols)
         return plan_with_content
     
-    async def get_symbols_fallback_web(self, symbol):
-        symbol_json = await self.agents.symbol_file_agent(symbol)
+    async def get_symbols_fallback_web(self, symbol, client, auth_token, token_url):
+        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token, token_url)
         cwd = os.getcwd()
         if Path(os.path.join(cwd, symbol_json[symbol])).exists():
             file_path = os.path.join(cwd, symbol_json[symbol])
@@ -107,12 +107,12 @@ class Documer:
             with open(file_path, 'r') as f:
                 file_content = f.read()
         else:
-            file_text = await self.agents.symbol_web_agent(symbol)
+            file_text = await self.agents.symbol_web_agent(symbol, client, auth_token, token_url)
             file_content = file_text[symbol]
         return {symbol: file_content}
 
-    async def get_symbols_fallback_semantic(self, symbol):
-        symbol_json = await self.agents.symbol_file_agent(symbol)
+    async def get_symbols_fallback_semantic(self, symbol, client, auth_token, token_url):
+        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token, token_url)
         cwd = os.getcwd()
         if Path(os.path.join(cwd, symbol_json[symbol])).exists():
             file_path = os.path.join(cwd, symbol_json[symbol])
@@ -123,7 +123,7 @@ class Documer:
             with open(file_path, 'r') as f:
                 file_content = f.read()
         else:
-            file_text = await self.agents.symbol_semantic_agent(symbol)
+            file_text = await self.agents.symbol_semantic_agent(symbol, client, auth_token, token_url)
             file_path = next(iter(file_text.values()))
             try:
                 with open(file_path, 'r') as f:
@@ -312,7 +312,7 @@ class DocumerAgent:
 
         return src
     
-    async def symbol_file_agent(self, symbol):
+    async def symbol_file_agent(self, symbol, client, auth_token, token_url):
         results = subprocess.run(f"rg -i '{symbol}'", shell=True, capture_output=True, text=True).stdout
         token_count = await check_token_count(results)
         if not token_count:
@@ -325,10 +325,12 @@ class DocumerAgent:
             input=prompt,
             text_format=PathResponse
         )
+        total_tokens = response.usage.total_tokens
+        await self.post_token(client, auth_token, total_tokens, token_url)
         path = response.output_parsed.path
         return {symbol: path}
 
-    async def symbol_web_agent(self, symbol):
+    async def symbol_web_agent(self, symbol, client, auth_token, token_url):
         with open(f"{self.config.root_directory}/prompts/symbol_web_agent.md") as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{symbol}}", symbol).replace('{{repository}}', self.config.slug)
@@ -341,6 +343,8 @@ class DocumerAgent:
                 }
             ]
         )
+        total_tokens = response.usage.total_tokens
+        await self.post_token(client, auth_token, total_tokens, token_url)
         text = response.output_text
         return {symbol: text}
     
