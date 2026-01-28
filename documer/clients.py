@@ -77,10 +77,10 @@ class Documer:
         return plan["plan"], src
 
     async def generate_plan_pro(self, Client):
-        report = await self.agents.src_architect_agent()
+        report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
         tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
         plan_raw, src = await asyncio.gather(*tasks)
-        plan = await self.agents.validate_plan(plan_raw["plan"])
+        plan = await self.agents.validate_plan(plan_raw["plan"], Client, self.config.token, self.token_url)
         await self.post_plan(Client, plan, self.config.token)
         return plan["plan"], src
 
@@ -486,7 +486,7 @@ class DocumerAgent:
         page = json.loads(response) 
         return {"page": page, "total_tokens": total_tokens}
     
-    async def validate_plan(self, plan):
+    async def validate_plan(self, plan, client, auth_token, token_url):
         schema = {
     "type": "object",
     "properties": {
@@ -534,12 +534,20 @@ class DocumerAgent:
             stream=True
         )
         full_text = ""
+        total_tokens = 0
         async for event in stream:
+            if event.type == "message_start":
+                total_tokens += event.message.usage.input_tokens
             if event.type == "content_block_delta":
                 if event.delta.type == "text_delta":
                     full_text += event.delta.text
                     escaped = event.delta.text.replace('\n', ' ')
                     print(f'PLAN_CHUNK:{escaped}', flush=True)
+            if event.type == "message_delta":
+                if hasattr(event, 'usage') and event.usage:
+                    total_tokens += event.usage.output_tokens
+        await self.post_token(client, auth_token, total_tokens, token_url)
+        print(total_tokens)
         result = json.loads(full_text)
         return result
     
