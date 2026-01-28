@@ -41,6 +41,7 @@ class Documer:
         self.agents = DocumerAgent(config)
         self.url = 'http://127.0.0.1:8000/documentation/pages/'
         self.obj_url = f'http://127.0.0.1:8000/documentation/?id={self.config.id}'
+        self.token_url = f'http://127.0.0.1:8000/documentation/token/?id={self.config.id}'
     
     async def generate_documentation(self):
         async with httpx.AsyncClient() as Client:
@@ -52,12 +53,12 @@ class Documer:
             else:
                 plan, src = await self.generate_plan(Client)
             print(f'UPDATE:Reading the code', flush=True)
-            os.chdir(src)
-            plan_final = await self.get_symbol_files(plan)
-            results = await self.doc_generator(plan_final)
-            tasks = [self.post_page(Client, r, self.config.token) for r in results]
-            result = await asyncio.gather(*tasks, return_exceptions=True)
-            await self.post_status(Client, self.config.token)
+            # os.chdir(src)
+            # plan_final = await self.get_symbol_files(plan)
+            # results = await self.doc_generator(plan_final)
+            # tasks = [self.post_page(Client, r, self.config.token) for r in results]
+            # result = await asyncio.gather(*tasks, return_exceptions=True)
+            # await self.post_status(Client, self.config.token)
 
     def initialize_repo(self):
         subprocess.run(
@@ -69,15 +70,15 @@ class Documer:
         os.chdir(f'repository/{self.config.repo_name}')
 
     async def generate_plan(self, Client):
-        report = await self.agents.src_architect_agent()
-        tasks = [self.agents.planner_agent(report), self.agents.src_path_extractor_agent(report)]
+        report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
+        tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
         plan, src = await asyncio.gather(*tasks)
         await self.post_plan(Client, plan, self.config.token)
         return plan["plan"], src
 
     async def generate_plan_pro(self, Client):
         report = await self.agents.src_architect_agent()
-        tasks = [self.agents.planner_agent(report, False), self.agents.src_path_extractor_agent(report)]
+        tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
         plan_raw, src = await asyncio.gather(*tasks)
         plan = await self.agents.validate_plan(plan_raw["plan"])
         await self.post_plan(Client, plan, self.config.token)
@@ -173,7 +174,7 @@ class DocumerAgent:
         self.claude_client = AsyncAnthropic(api_key=config.validator_api_key)
     
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(KeyError), after=log_retry)
-    async def src_architect_agent(self):
+    async def src_architect_agent(self, client, auth_token, token_url): 
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{slug}}", self.config.slug)
@@ -187,6 +188,9 @@ class DocumerAgent:
         response = await chat.send_message(
             prompt
         )
+        total_tokens = 0
+        if response.usage_metadata:
+            total_tokens += response.usage_metadata.total_token_count
         while has_function_calls(response):
             calls = get_function_calls(response)
             function_response_parts = []
@@ -201,10 +205,14 @@ class DocumerAgent:
                 function_response_parts.append(function_response)
 
             response = await chat.send_message(function_response_parts)
-        
+
+            if response.usage_metadata:
+                total_tokens += response.usage_metadata.total_token_count
+        print('TOTAL TOKENS SRC AGENT:', total_tokens)
+        await self.post_token(client, auth_token, total_tokens, token_url)
         return response.candidates[0].content.parts[0].text
 
-    async def planner_agent(self, report, stream=True):
+    async def planner_agent(self, report, client, auth_token, token_url, stream=True):
         schema = {
   "type": "object",
   "properties": {
@@ -254,17 +262,21 @@ class DocumerAgent:
         response_stream = await chat.send_message_stream(
             prompt
         )
+        total_tokens = 0
         async for chunk in response_stream:
             if chunk.text:
                 response += chunk.text
                 escaped = chunk.text.replace('\n', ' ')
                 if(stream):
                     print(f'PLAN_CHUNK:{escaped}', flush=True)
+            if chunk.usage_metadata:
+                total_tokens = chunk.usage_metadata.total_token_count
+        await self.post_token(client, auth_token, total_tokens, token_url)
         plan_data = json.loads(response)
         return plan_data
     
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(FileNotFoundError), after=log_retry)
-    async def src_path_extractor_agent(self, report):
+    async def src_path_extractor_agent(self, report, client, auth_token, token_url):
         prompt = f"Based on the text, output the source code path {report}"
         schema = { "type": "object", "properties": { "path": { "type": "string" } }, "required": [ "path" ], "propertyOrdering": [ "path" ] }
 
@@ -284,6 +296,11 @@ class DocumerAgent:
         response = await chat.send_message(
             prompt
         )
+        total_tokens = 0
+        if response.usage_metadata:
+            total_tokens += response.usage_metadata.total_token_count
+        await self.post_token(client, auth_token, total_tokens, token_url)
+
         path = json.loads(response.candidates[0].content.parts[0].text)
         if path["path"] == "/":
             src = '.'
@@ -518,3 +535,9 @@ class DocumerAgent:
                     print(f'PLAN_CHUNK:{escaped}', flush=True)
         result = json.loads(full_text)
         return result
+    
+    async def post_token(self, client, auth_token, token, token_url):
+        payload = {"token_count": token, "documentation_id": self.config.id}
+        headers = {"Content-Type": "application/json", "Authorization": f'Bearer {auth_token}'}
+        r = await client.post(token_url, json=payload, headers=headers)
+        r.raise_for_status()
