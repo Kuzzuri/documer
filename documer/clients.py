@@ -53,12 +53,12 @@ class Documer:
             else:
                 plan, src = await self.generate_plan(Client)
             print(f'UPDATE:Reading the code', flush=True)
-            # os.chdir(src)
-            # plan_final = await self.get_symbol_files(plan)
-            # results = await self.doc_generator(plan_final)
-            # tasks = [self.post_page(Client, r, self.config.token) for r in results]
-            # result = await asyncio.gather(*tasks, return_exceptions=True)
-            # await self.post_status(Client, self.config.token)
+            os.chdir(src)
+            plan_final = await self.get_symbol_files(plan)
+            results = await self.doc_generator(plan_final)
+            tasks = [self.post_page(Client, r, self.config.token) for r in results]
+            result = await asyncio.gather(*tasks, return_exceptions=True)
+            await self.post_status(Client, self.config.token)
 
     def initialize_repo(self):
         subprocess.run(
@@ -145,8 +145,8 @@ class Documer:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return results
     
-    async def post_page(self, client, page, token):
-        payload = {"content": page, "title": "shmbala", "documentation": self.config.id}
+    async def post_page(self, client, page_data, token):
+        payload = {"content": page_data["page"], "title": "shmbala", "documentation": self.config.id, "token_count": page_data["total_tokens"]}
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
         r = await client.post(self.url, json=payload, headers=headers)
         r.raise_for_status()
@@ -467,6 +467,7 @@ class DocumerAgent:
             response_schema=schema
         )
         chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
+        total_tokens = 0
         response = ''
         response_stream = await chat.send_message_stream(
             prompt
@@ -476,8 +477,10 @@ class DocumerAgent:
                 response += chunk.text
                 escaped = chunk.text.replace('\n', ' ')
                 print(f'RESPONSEID_{chunk.response_id}:{escaped}', flush=True)
+            if chunk.usage_metadata:
+                total_tokens = chunk.usage_metadata.total_token_count
         page = json.loads(response) 
-        return page
+        return {"page": page, "total_tokens": total_tokens}
     
     async def validate_plan(self, plan):
         schema = {
