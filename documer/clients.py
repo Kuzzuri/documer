@@ -6,7 +6,7 @@ from google.genai import types
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from .tools import has_function_calls, get_function_calls, collect_api_items, switch_to_paths, check_if_path, check_token_count
-from .utils import check_api_percentage, check_api_path, log_retry
+from .utils import check_api_percentage, check_api_path, log_retry, analyze_repo_language
 import httpx
 from anthropic import AsyncAnthropic
 import tenacity
@@ -46,12 +46,12 @@ class Documer:
     async def generate_documentation(self):
         async with httpx.AsyncClient() as Client:
             print(f'UPDATE:Analyzing Repository', flush=True)
-            self.initialize_repo()
+            lang = self.initialize_repo()
             print(f'UPDATE:Generating Documentation Plan', flush=True)
             if self.config.agent_model == 'D1M':
-                plan, src = await self.generate_plan_pro(Client)
+                plan, src = await self.generate_plan_pro(Client, lang)
             else:
-                plan, src = await self.generate_plan(Client)
+                plan, src = await self.generate_plan(Client, lang)
             print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
             plan_final = await self.get_symbol_files(plan, Client, self.config.token, self.token_url)
@@ -62,26 +62,30 @@ class Documer:
 
     def initialize_repo(self):
         subprocess.run(
-    ['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL
-)
+            ['git', 'clone', '--depth', '1', self.config.repository_url, f'./repository/{self.config.repo_name}'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
         subprocess.run(['bash', 'filter_repo.sh', f'./repository/{self.config.repo_name}'])
+        result = subprocess.run(['bash', 'analyze_language.sh'], capture_output=True, text=True).stdout
+        language_raw = result.split('\n')[0].split(' ')[1]
+        language = analyze_repo_language(language_raw)
         os.chdir(f'repository/{self.config.repo_name}')
+        return language
 
-    async def generate_plan(self, Client):
+    async def generate_plan(self, Client, lang):
         report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
         tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
         plan, src = await asyncio.gather(*tasks)
-        await self.post_plan(Client, plan, self.config.token)
+        await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
-    async def generate_plan_pro(self, Client):
+    async def generate_plan_pro(self, Client, lang):
         report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
         tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
         plan_raw, src = await asyncio.gather(*tasks)
         plan = await self.agents.validate_plan(plan_raw["plan"], Client, self.config.token, self.token_url)
-        await self.post_plan(Client, plan, self.config.token)
+        await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
     async def get_symbol_files(self, plan, client, auth_token, token_url):
@@ -152,8 +156,10 @@ class Documer:
         r.raise_for_status()
         # print(r.json())
 
-    async def post_plan(self, client, plan, token):
+    async def post_plan(self, client, plan, token, lang):
         payload = {"plan": plan}
+        if lang:
+            payload['language'] = lang
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
         r = await client.patch(self.obj_url, json=payload, headers=headers)
         r.raise_for_status()
@@ -274,7 +280,7 @@ class DocumerAgent:
         await self.post_token(client, auth_token, total_tokens, token_url)
         plan_data = json.loads(response)
         return plan_data
-    
+
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(FileNotFoundError), after=log_retry)
     async def src_path_extractor_agent(self, report, client, auth_token, token_url):
         prompt = f"Based on the text, output the source code path {report}"
@@ -327,7 +333,8 @@ class DocumerAgent:
         )
         total_tokens = response.usage.total_tokens
         await self.post_token(client, auth_token, total_tokens, token_url)
-        path = response.output_parsed.path
+        path = response.output_parsed.path.rsplit('.', 1)[-1]
+        lang = analyze_repo_language(path)
         return {symbol: path}
 
     async def symbol_web_agent(self, symbol, client, auth_token, token_url):
