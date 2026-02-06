@@ -189,58 +189,61 @@ class DocumerAgent:
     
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(KeyError), after=log_retry)
     async def src_architect_agent(self, client, auth_token): 
-        schema = {
-  "type": "object",
-  "properties": {
-    "source_code_path": {
-      "type": "string"
-    },
-    "report": {
-      "type": "string"
-    }
-  },
-  "required": [
-    "source_code_path",
-    "report"
-  ]
-}
-        with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
-            prompt_raw = f.read()
-        prompt = prompt_raw.replace("{{slug}}", self.config.slug)
-        gemini_config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=self.config.tools[:1])],
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=False,
-                thinking_level=self.config.thinking_level
-            ),
-            response_mime_type="application/json",
-            response_schema=schema
-        )
-        chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
-        response = await chat.send_message(
-            prompt
-        )
         total_tokens = 0
-        if response.usage_metadata:
-            total_tokens += response.usage_metadata.total_token_count
-        while has_function_calls(response):
-            calls = get_function_calls(response)
-            function_response_parts = []
-
-            tasks = [self.config.fn_dict[call['name']](**call['args']) for call in calls]
-            results = await asyncio.gather(*tasks)
-            for i, call in enumerate(calls):
-                function_response = types.Part.from_function_response(
-                    name=call['name'],
-                    response={"result": results[i]}
-                )
-                function_response_parts.append(function_response)
-
-            response = await chat.send_message(function_response_parts)
-
+        try:
+            schema = {
+    "type": "object",
+    "properties": {
+        "source_code_path": {
+        "type": "string"
+        },
+        "report": {
+        "type": "string"
+        }
+    },
+    "required": [
+        "source_code_path",
+        "report"
+    ]
+    }
+            with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
+                prompt_raw = f.read()
+            prompt = prompt_raw.replace("{{slug}}", self.config.slug)
+            gemini_config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=self.config.tools[:1])],
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=False,
+                    thinking_level=self.config.thinking_level
+                ),
+                response_mime_type="application/json",
+                response_schema=schema
+            )
+            chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
+            response = await chat.send_message(
+                prompt
+            )
             if response.usage_metadata:
                 total_tokens += response.usage_metadata.total_token_count
-        # await self.post_token(client, auth_token, total_tokens)
-        return json.loads(response.candidates[0].content.parts[0].text)
+            while has_function_calls(response):
+                calls = get_function_calls(response)
+                function_response_parts = []
+
+                tasks = [self.config.fn_dict[call['name']](**call['args']) for call in calls]
+                results = await asyncio.gather(*tasks)
+                for i, call in enumerate(calls):
+                    function_response = types.Part.from_function_response(
+                        name=call['name'],
+                        response={"result": results[i]}
+                    )
+                    function_response_parts.append(function_response)
+
+                response = await chat.send_message(function_response_parts)
+
+                if response.usage_metadata:
+                    total_tokens += response.usage_metadata.total_token_count
+            return json.loads(response.candidates[0].content.parts[0].text)
+        finally:
+            if total_tokens > 0:
+                await self.post_token(client, auth_token, total_tokens)
 
     async def planner_agent(self, report, client, auth_token, stream=True):
         schema = {
@@ -307,40 +310,44 @@ class DocumerAgent:
 
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(FileNotFoundError), after=log_retry)
     async def src_path_extractor_agent(self, report, client, auth_token):
-        prompt = f"Based on the text, output the source code path {report}"
-        schema = { "type": "object", "properties": { "path": { "type": "string" } }, "required": [ "path" ], "propertyOrdering": [ "path" ] }
-
-        gemini_config = types.GenerateContentConfig(
-            tools=[
-                types.Tool(google_search=types.GoogleSearch()),
-                types.Tool(url_context=types.UrlContext())
-            ], 
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=False,
-                thinking_level=self.config.thinking_level
-            ),
-            response_mime_type="application/json",
-            response_schema=schema
-        )
-        chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
-        response = await chat.send_message(
-            prompt
-        )
         total_tokens = 0
-        if response.usage_metadata:
-            total_tokens += response.usage_metadata.total_token_count
-        await self.post_token(client, auth_token, total_tokens)
+        try:
+            prompt = f"Based on the text, output the source code path {report}"
+            schema = { "type": "object", "properties": { "path": { "type": "string" } }, "required": [ "path" ], "propertyOrdering": [ "path" ] }
 
-        path = json.loads(response.candidates[0].content.parts[0].text)
-        if path["path"] == "/":
-            src = '.'
-        else:
-            src = path["path"]
+            gemini_config = types.GenerateContentConfig(
+                tools=[
+                    types.Tool(google_search=types.GoogleSearch()),
+                    types.Tool(url_context=types.UrlContext())
+                ], 
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=False,
+                    thinking_level=self.config.thinking_level
+                ),
+                response_mime_type="application/json",
+                response_schema=schema
+            )
+            chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
+            response = await chat.send_message(
+                prompt
+            )
+            
+            if response.usage_metadata:
+                total_tokens += response.usage_metadata.total_token_count
 
-        if not os.path.exists(src):
-            raise FileNotFoundError(f"Path does not exist: {src}")
+            path = json.loads(response.candidates[0].content.parts[0].text)
+            if path["path"] == "/":
+                src = '.'
+            else:
+                src = path["path"]
 
-        return src
+            if not os.path.exists(src):
+                raise FileNotFoundError(f"Path does not exist: {src}")
+
+            return src
+        finally:
+            if total_tokens > 0:
+                await self.post_token(client, auth_token, total_tokens)
     
     async def symbol_file_agent(self, symbol, client, auth_token):
         results = subprocess.run(f"rg -i '{symbol}'", shell=True, capture_output=True, text=True).stdout

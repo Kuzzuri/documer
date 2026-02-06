@@ -4,9 +4,9 @@ from documer.clients import DocumerConfig, Documer
 from documer.agent_tools import list_directory, grep, find
 import sys, asyncio, subprocess
 import os, json
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 
-# load_dotenv()
+load_dotenv()
 
 
 fn_dict = {
