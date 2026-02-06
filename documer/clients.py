@@ -16,6 +16,10 @@ from tenacity import retry, stop_after_attempt, retry_if_exception_type
 class PathResponse(BaseModel):
     path: str
 
+current_file = Path(__file__).resolve()
+with open(f'{current_file.parent.parent}/subscriptions.json', 'r') as f:
+    subscriptions = json.load(f)
+
 class DocumerConfig:
     def __init__(self, id, api_key, sub_api_key, validator_api_key, repository_url, model, sub_model, tools, fn_dict, thinking_level, token, agent_model):
         self.id = id
@@ -34,14 +38,15 @@ class DocumerConfig:
         self.token = token
         self.agent_model = agent_model
         self.validator_api_key = validator_api_key
+        self.url = 'http://127.0.0.1:8000/documentation/pages/'
+        self.obj_url = f'http://127.0.0.1:8000/documentation/?id={id}'
+        self.token_url = f'http://127.0.0.1:8000/documentation/token/?id={id}'
+        self.low_tier_model = 'gemini-2.5-flash-lite'
 
 class Documer:
     def __init__(self, config):
         self.config = config
         self.agents = DocumerAgent(config)
-        self.url = 'http://127.0.0.1:8000/documentation/pages/'
-        self.obj_url = f'http://127.0.0.1:8000/documentation/?id={self.config.id}'
-        self.token_url = f'http://127.0.0.1:8000/documentation/token/?id={self.config.id}'
     
     async def generate_documentation(self):
         async with httpx.AsyncClient() as Client:
@@ -54,7 +59,7 @@ class Documer:
                 plan, src = await self.generate_plan(Client, lang)
             print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
-            plan_final = await self.get_symbol_files(plan, Client, self.config.token, self.token_url)
+            plan_final = await self.get_symbol_files(plan, Client, self.config.token)
             results = await self.doc_generator(plan_final)
             tasks = [self.post_page(Client, r, self.config.token) for r in results]
             result = await asyncio.gather(*tasks, return_exceptions=True)
@@ -74,33 +79,33 @@ class Documer:
         return language
 
     async def generate_plan(self, Client, lang):
-        report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
-        tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
+        report = await self.agents.src_architect_agent(Client, self.config.token)
+        tasks = [self.agents.planner_agent(report, Client, self.config.token), self.agents.src_path_extractor_agent(report, Client, self.config.token)]
         plan, src = await asyncio.gather(*tasks)
         await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
     async def generate_plan_pro(self, Client, lang):
-        report = await self.agents.src_architect_agent(Client, self.config.token, self.token_url)
-        tasks = [self.agents.planner_agent(report, Client, self.config.token, self.token_url, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token, self.token_url)]
+        report = await self.agents.src_architect_agent(Client, self.config.token)
+        tasks = [self.agents.planner_agent(report, Client, self.config.token, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token)]
         plan_raw, src = await asyncio.gather(*tasks)
-        plan = await self.agents.validate_plan(plan_raw["plan"], Client, self.config.token, self.token_url)
+        plan = await self.agents.validate_plan(plan_raw["plan"], Client, self.config.token)
         await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
-    async def get_symbol_files(self, plan, client, auth_token, token_url):
+    async def get_symbol_files(self, plan, client, auth_token):
         sets = await collect_api_items(plan)
         percentage = check_api_percentage(sets)
         if percentage:
-            tasks = [self.get_symbols_fallback_web(s, client, auth_token, token_url) for s in sets]
+            tasks = [self.get_symbols_fallback_web(s, client, auth_token) for s in sets]
         else:
-            tasks = [self.get_symbols_fallback_semantic(s, client, auth_token, token_url) for s in sets]
+            tasks = [self.get_symbols_fallback_semantic(s, client, auth_token) for s in sets]
         symbols = await asyncio.gather(*tasks)
         plan_with_content = await self.add_plan_contents(plan, symbols)
         return plan_with_content
     
-    async def get_symbols_fallback_web(self, symbol, client, auth_token, token_url):
-        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token, token_url)
+    async def get_symbols_fallback_web(self, symbol, client, auth_token):
+        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token)
         cwd = os.getcwd()
         if Path(os.path.join(cwd, symbol_json[symbol])).exists():
             file_path = os.path.join(cwd, symbol_json[symbol])
@@ -111,12 +116,12 @@ class Documer:
             with open(file_path, 'r') as f:
                 file_content = f.read()
         else:
-            file_text = await self.agents.symbol_web_agent(symbol, client, auth_token, token_url)
+            file_text = await self.agents.symbol_web_agent(symbol, client, auth_token)
             file_content = file_text[symbol]
         return {symbol: file_content}
 
-    async def get_symbols_fallback_semantic(self, symbol, client, auth_token, token_url):
-        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token, token_url)
+    async def get_symbols_fallback_semantic(self, symbol, client, auth_token):
+        symbol_json = await self.agents.symbol_file_agent(symbol, client, auth_token)
         cwd = os.getcwd()
         if Path(os.path.join(cwd, symbol_json[symbol])).exists():
             file_path = os.path.join(cwd, symbol_json[symbol])
@@ -127,7 +132,7 @@ class Documer:
             with open(file_path, 'r') as f:
                 file_content = f.read()
         else:
-            file_text = await self.agents.symbol_semantic_agent(symbol, client, auth_token, token_url)
+            file_text = await self.agents.symbol_semantic_agent(symbol, client, auth_token)
             file_path = next(iter(file_text.values()))
             try:
                 with open(file_path, 'r') as f:
@@ -152,7 +157,7 @@ class Documer:
     async def post_page(self, client, page_data, token):
         payload = {"content": page_data["page"], "title": "shmbala", "documentation": self.config.id, "token_count": page_data["total_tokens"]}
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
-        r = await client.post(self.url, json=payload, headers=headers)
+        r = await client.post(self.config.url, json=payload, headers=headers)
         r.raise_for_status()
         # print(r.json())
 
@@ -161,14 +166,14 @@ class Documer:
         if lang:
             payload['language'] = lang
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
-        r = await client.patch(self.obj_url, json=payload, headers=headers)
+        r = await client.patch(self.config.obj_url, json=payload, headers=headers)
         r.raise_for_status()
         # print(r.json())
 
     async def post_status(self, client, token):
         payload = {"status": True}
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {token}'}
-        r = await client.patch(self.obj_url, json=payload, headers=headers)
+        r = await client.patch(self.config.obj_url, json=payload, headers=headers)
         r.raise_for_status()
         # print(r.json())
 
@@ -180,7 +185,7 @@ class DocumerAgent:
         self.claude_client = AsyncAnthropic(api_key=config.validator_api_key)
     
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(KeyError), after=log_retry)
-    async def src_architect_agent(self, client, auth_token, token_url): 
+    async def src_architect_agent(self, client, auth_token): 
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{slug}}", self.config.slug)
@@ -215,10 +220,10 @@ class DocumerAgent:
             if response.usage_metadata:
                 total_tokens += response.usage_metadata.total_token_count
         print('TOTAL TOKENS SRC AGENT:', total_tokens)
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
         return response.candidates[0].content.parts[0].text
 
-    async def planner_agent(self, report, client, auth_token, token_url, stream=True):
+    async def planner_agent(self, report, client, auth_token, stream=True):
         schema = {
   "type": "object",
   "properties": {
@@ -277,12 +282,12 @@ class DocumerAgent:
                     print(f'PLAN_CHUNK:{escaped}', flush=True)
             if chunk.usage_metadata:
                 total_tokens = chunk.usage_metadata.total_token_count
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
         plan_data = json.loads(response)
         return plan_data
 
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(FileNotFoundError), after=log_retry)
-    async def src_path_extractor_agent(self, report, client, auth_token, token_url):
+    async def src_path_extractor_agent(self, report, client, auth_token):
         prompt = f"Based on the text, output the source code path {report}"
         schema = { "type": "object", "properties": { "path": { "type": "string" } }, "required": [ "path" ], "propertyOrdering": [ "path" ] }
 
@@ -305,7 +310,7 @@ class DocumerAgent:
         total_tokens = 0
         if response.usage_metadata:
             total_tokens += response.usage_metadata.total_token_count
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
 
         path = json.loads(response.candidates[0].content.parts[0].text)
         if path["path"] == "/":
@@ -318,7 +323,7 @@ class DocumerAgent:
 
         return src
     
-    async def symbol_file_agent(self, symbol, client, auth_token, token_url):
+    async def symbol_file_agent(self, symbol, client, auth_token):
         results = subprocess.run(f"rg -i '{symbol}'", shell=True, capture_output=True, text=True).stdout
         token_count = await check_token_count(results)
         if not token_count:
@@ -332,12 +337,12 @@ class DocumerAgent:
             text_format=PathResponse
         )
         total_tokens = response.usage.total_tokens
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
         path = response.output_parsed.path.rsplit('.', 1)[-1]
         lang = analyze_repo_language(path)
         return {symbol: path}
 
-    async def symbol_web_agent(self, symbol, client, auth_token, token_url):
+    async def symbol_web_agent(self, symbol, client, auth_token):
         with open(f"{self.config.root_directory}/prompts/symbol_web_agent.md") as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{symbol}}", symbol).replace('{{repository}}', self.config.slug)
@@ -351,7 +356,7 @@ class DocumerAgent:
             ]
         )
         total_tokens = response.usage.total_tokens
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
         text = response.output_text
         return {symbol: text}
     
@@ -469,15 +474,27 @@ class DocumerAgent:
         "blocks"
     ]
     }
-        gemini_config = types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=False,
-                thinking_level=self.config.thinking_level
-            ),
-            response_mime_type="application/json",
-            response_schema=schema
-        )
-        chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
+        if subscriptions[self.config.agent_model]['tier'] > 1:
+            gemini_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=False,
+                    thinking_level=self.config.thinking_level
+                ),
+                response_mime_type="application/json",
+                response_schema=schema
+            )
+            model = self.config.model
+        else:
+            gemini_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(
+                    include_thoughts=False,
+                    thinking_budget=2048
+                ),
+                response_mime_type="application/json",
+                response_schema=schema
+            )
+            model = self.config.low_tier_model
+        chat = self.gemini_client.aio.chats.create(model=model, config=gemini_config)
         total_tokens = 0
         response = ''
         response_stream = await chat.send_message_stream(
@@ -493,7 +510,7 @@ class DocumerAgent:
         page = json.loads(response) 
         return {"page": page, "total_tokens": total_tokens}
     
-    async def validate_plan(self, plan, client, auth_token, token_url):
+    async def validate_plan(self, plan, client, auth_token):
         schema = {
     "type": "object",
     "properties": {
@@ -553,13 +570,13 @@ class DocumerAgent:
             if event.type == "message_delta":
                 if hasattr(event, 'usage') and event.usage:
                     total_tokens += event.usage.output_tokens
-        await self.post_token(client, auth_token, total_tokens, token_url)
+        await self.post_token(client, auth_token, total_tokens)
         print(total_tokens)
         result = json.loads(full_text)
         return result
     
-    async def post_token(self, client, auth_token, token, token_url):
+    async def post_token(self, client, auth_token, token):
         payload = {"token_count": token, "documentation_id": self.config.id}
         headers = {"Content-Type": "application/json", "Authorization": f'Bearer {auth_token}'}
-        r = await client.post(token_url, json=payload, headers=headers)
+        r = await client.post(self.config.token_url, json=payload, headers=headers)
         r.raise_for_status()
