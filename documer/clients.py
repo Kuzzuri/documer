@@ -80,15 +80,15 @@ class Documer:
 
     async def generate_plan(self, Client, lang):
         report = await self.agents.src_architect_agent(Client, self.config.token)
-        tasks = [self.agents.planner_agent(report, Client, self.config.token), self.agents.src_path_extractor_agent(report, Client, self.config.token)]
-        plan, src = await asyncio.gather(*tasks)
+        src = report['source_code_path']
+        plan = await self.agents.planner_agent(report['report'], Client, self.config.token)
         await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
     async def generate_plan_pro(self, Client, lang):
         report = await self.agents.src_architect_agent(Client, self.config.token)
-        tasks = [self.agents.planner_agent(report, Client, self.config.token, stream=False), self.agents.src_path_extractor_agent(report, Client, self.config.token)]
-        plan_raw, src = await asyncio.gather(*tasks)
+        src = report['source_code_path']
+        plan_raw = self.agents.planner_agent(report['report'], Client, self.config.token, stream=False)
         plan = await self.agents.validate_plan(plan_raw["plan"], Client, self.config.token)
         await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
@@ -186,14 +186,31 @@ class DocumerAgent:
     
     @retry(stop=stop_after_attempt(3), retry=retry_if_exception_type(KeyError), after=log_retry)
     async def src_architect_agent(self, client, auth_token): 
+        schema = {
+  "type": "object",
+  "properties": {
+    "source_code_path": {
+      "type": "string"
+    },
+    "report": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_code_path",
+    "report"
+  ]
+}
         with open(f"{self.config.root_directory}/prompts/src_architect_agent.md", 'r') as f:
             prompt_raw = f.read()
         prompt = prompt_raw.replace("{{slug}}", self.config.slug)
         gemini_config = types.GenerateContentConfig(tools=[types.Tool(function_declarations=self.config.tools[:1])],
             thinking_config=types.ThinkingConfig(
-                include_thoughts=True,
+                include_thoughts=False,
                 thinking_level=self.config.thinking_level
-            )
+            ),
+            response_mime_type="application/json",
+            response_schema=schema
         )
         chat = self.gemini_client.aio.chats.create(model=self.config.model, config=gemini_config)
         response = await chat.send_message(
@@ -219,9 +236,8 @@ class DocumerAgent:
 
             if response.usage_metadata:
                 total_tokens += response.usage_metadata.total_token_count
-        print('TOTAL TOKENS SRC AGENT:', total_tokens)
-        await self.post_token(client, auth_token, total_tokens)
-        return response.candidates[0].content.parts[0].text
+        # await self.post_token(client, auth_token, total_tokens)
+        return json.loads(response.candidates[0].content.parts[0].text)
 
     async def planner_agent(self, report, client, auth_token, stream=True):
         schema = {
@@ -474,7 +490,7 @@ class DocumerAgent:
         "blocks"
     ]
     }
-        if subscriptions[self.config.agent_model]['tier'] > 1:
+        if subscriptions[self.config.agent_model]['tier'] > 0:
             gemini_config = types.GenerateContentConfig(
                 thinking_config=types.ThinkingConfig(
                     include_thoughts=False,
