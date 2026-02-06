@@ -41,6 +41,9 @@ class DocumerConfig:
         self.url = 'http://127.0.0.1:8000/documentation/pages/'
         self.obj_url = f'http://127.0.0.1:8000/documentation/?id={id}'
         self.token_url = f'http://127.0.0.1:8000/documentation/token/?id={id}'
+        # self.url = 'http://host.docker.internal:8000/documentation/pages/'
+        # self.obj_url = f'http://host.docker.internal:8000/documentation/?id={id}'
+        # self.token_url = f'http://host.docker.internal:8000/documentation/token/?id={id}'
         self.low_tier_model = 'gemini-2.5-flash-lite'
 
 class Documer:
