@@ -54,7 +54,9 @@ class Documer:
     async def generate_documentation(self):
         async with httpx.AsyncClient() as Client:
             print(f'UPDATE:Analyzing Repository', flush=True)
+            print(f'INCREMENT', flush=True)
             lang = self.initialize_repo()
+            print(f'INCREMENT', flush=True)
             print(f'UPDATE:Generating Documentation Plan', flush=True)
             if self.config.agent_model == 'D1M':
                 plan, src = await self.generate_plan_pro(Client, lang)
@@ -63,9 +65,12 @@ class Documer:
             print(f'UPDATE:Reading the code', flush=True)
             os.chdir(src)
             plan_final = await self.get_symbol_files(plan, Client, self.config.token)
+            print(f'INCREMENT', flush=True)
             results = await self.doc_generator(plan_final)
+            print(f'INCREMENT', flush=True)
             tasks = [self.post_page(Client, r, self.config.token) for r in results]
             result = await asyncio.gather(*tasks, return_exceptions=True)
+            print(f'INCREMENT', flush=True)
             await self.post_status(Client, self.config.token)
 
     def initialize_repo(self):
@@ -83,8 +88,10 @@ class Documer:
 
     async def generate_plan(self, Client, lang):
         report = await self.agents.src_architect_agent(Client, self.config.token)
+        print(f'INCREMENT', flush=True)
         src = report['source_code_path']
         plan = await self.agents.planner_agent(report['report'], Client, self.config.token)
+        print(f'INCREMENT', flush=True)
         await self.post_plan(Client, plan, self.config.token, lang)
         return plan["plan"], src
 
@@ -98,13 +105,16 @@ class Documer:
 
     async def get_symbol_files(self, plan, client, auth_token):
         sets = await collect_api_items(plan)
+        print(f'INCREMENT', flush=True)
         percentage = check_api_percentage(sets)
         if percentage:
             tasks = [self.get_symbols_fallback_web(s, client, auth_token) for s in sets]
         else:
             tasks = [self.get_symbols_fallback_semantic(s, client, auth_token) for s in sets]
         symbols = await asyncio.gather(*tasks)
+        print(f'INCREMENT', flush=True)
         plan_with_content = await self.add_plan_contents(plan, symbols)
+        print(f'INCREMENT', flush=True)
         return plan_with_content
     
     async def get_symbols_fallback_web(self, symbol, client, auth_token):
